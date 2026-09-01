@@ -1,4 +1,4 @@
-const API_BASE = 'https://shopcompare.onrender.com';
+const API_BASE = 'https://shopcompare-v2.onrender.com';
 
 const demoProducts = [
   {id:'1', name:'Apple AirPods Pro (2nd Generation) USB-C', store:'Amazon', price:189.99, rating:4.6, reviews:18542, shipping:'Free shipping', delivery:'2–3 days', emoji:'🎧', keywords:'wireless earbuds airpods headphones apple', score:96, productUrl:'https://www.amazon.com/'},

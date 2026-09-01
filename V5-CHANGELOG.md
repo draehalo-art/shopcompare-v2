@@ -30,3 +30,6 @@ Next:
 - Kept existing shopper Value Score and comparison engine separate from the new Opportunity Score.
 - No external AI API key is required yet; this is the deterministic screening layer that can support an AI analyst in the next step.
 - Demo data only; all commercial estimates must be validated before selling.
+
+## V5.1.1 — API base fix
+- Pointed the frontend Product Finder/search API base to the new `shopcompare-v2.onrender.com` backend instead of the old `shopcompare.onrender.com` service.
