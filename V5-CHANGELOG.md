@@ -33,3 +33,10 @@ Next:
 
 ## V5.1.1 — API base fix
 - Pointed the frontend Product Finder/search API base to the new `shopcompare-v2.onrender.com` backend instead of the old `shopcompare.onrender.com` service.
+
+## V5.1.5 — Opportunity engine realism pass
+- Replaced the fixed 2.2x price heuristic with a target-margin + observed-comparable pricing model.
+- Added payment, marketing and returns reserves to estimate contribution profit/margin.
+- Competition is now explicitly labeled as observed catalog competition, not whole-market competition.
+- Added comparable-price evidence and transparent scoring assumptions to the API.
+- Kept shopper Value Score separate from dropshipping Opportunity Score.

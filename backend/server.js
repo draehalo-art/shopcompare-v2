@@ -4,7 +4,7 @@ const path = require("path");
 const { URL } = require("url");
 
 const PORT = process.env.PORT || 3000;
-const APP_VERSION = "v5.1-stage1";
+const APP_VERSION = "v5.1.5-opportunity-engine";
 
 const demoProducts = [
   {id:"demo-amazon-earbuds", name:"Apple AirPods Pro (2nd Generation) USB-C", store:"Amazon", price:189.99, rating:4.6, reviews:18542, shipping:"Free shipping", delivery:"2–3 days", url:"https://www.amazon.com/", keywords:"wireless earbuds airpods headphones apple", brand:"Apple"},
@@ -49,6 +49,19 @@ function categoryFor(p) {
   return "Other";
 }
 
+function roundPsychological(value) {
+  const n = Number(value) || 0;
+  if (n <= 10) return Number(n.toFixed(2));
+  return Number((Math.floor(n) + 0.99).toFixed(2));
+}
+
+function median(values) {
+  const nums = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!nums.length) return null;
+  const mid = Math.floor(nums.length / 2);
+  return nums.length % 2 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
+}
+
 function opportunityScore(p, catalog = demoProducts) {
   const price = Number(p.price) || 0;
   const shipping = shippingCost(p);
@@ -56,65 +69,137 @@ function opportunityScore(p, catalog = demoProducts) {
   const rating = Number(p.rating) || 0;
   const reviews = Number(p.reviews) || 0;
   const days = deliveryDays(p);
+  const category = categoryFor(p);
 
-  // A conservative test-price model: 2.2x landed cost, with a modest ceiling.
-  // This is an estimate for screening, not a promised selling price.
-  const suggestedPrice = Math.max(9.99, Math.min(79.99, landed * 2.2));
+  // These are transparent screening assumptions. They are intentionally kept
+  // separate from the shopper-facing Value Score so the two scores answer
+  // different questions.
+  const assumptions = {
+    targetGrossMargin: 0.55,
+    paymentFeeRate: 0.029,
+    paymentFeeFixed: 0.30,
+    marketingReserveRate: 0.12,
+    returnsReserveRate: 0.03
+  };
+
+  const categoryItems = catalog.filter(x => categoryFor(x) === category);
+  const currentId = String(p.id || '');
+  const sameBrandItems = categoryItems.filter(x => String(x.id || '') !== currentId &&
+    String(x.brand || '').toLowerCase() === String(p.brand || '').toLowerCase());
+  const genericItems = categoryItems.filter(x => String(x.id || '') !== currentId &&
+    String(x.brand || '').toLowerCase() === 'generic');
+  // Generic products are compared with other generic products. For a branded
+  // item with no same-brand evidence, fall back to the broader category rather
+  // than pretending the product has no market evidence.
+  const currentBrand = String(p.brand || '').toLowerCase();
+  const hasSameBrandEvidence = currentBrand !== 'generic' && sameBrandItems.length > 0;
+  const comparableItems = currentBrand === 'generic'
+    ? genericItems
+    : (hasSameBrandEvidence ? sameBrandItems : []);
+  const observedPrices = comparableItems
+    .map(x => Number(x.price) + shippingCost(x))
+    .filter(x => x > 0);
+  const marketMedian = median(observedPrices);
+  const marketMax = observedPrices.length ? Math.max(...observedPrices) : null;
+
+  // Start from a 55% gross-margin target, then constrain the test price using
+  // observed comparable pricing when that evidence exists. This prevents the
+  // engine from inventing an attractive price that is far outside the observed
+  // market for generic products.
+  const targetPrice = landed > 0 ? landed / (1 - assumptions.targetGrossMargin) : 0;
+  const marketCeiling = marketMax ? marketMax * 1.10 : Infinity;
+  const floorPrice = landed > 0 ? Math.max(9.99, landed * 1.5) : 9.99;
+  const marketAwarePrice = Math.min(targetPrice, marketCeiling);
+  const suggestedPrice = roundPsychological(Math.max(9.99, marketAwarePrice));
+
   const grossProfit = Math.max(0, suggestedPrice - landed);
   const grossMargin = suggestedPrice ? grossProfit / suggestedPrice : 0;
+  const paymentFees = suggestedPrice * assumptions.paymentFeeRate + assumptions.paymentFeeFixed;
+  const marketingReserve = suggestedPrice * assumptions.marketingReserveRate;
+  const returnsReserve = suggestedPrice * assumptions.returnsReserveRate;
+  const estimatedVariableCosts = paymentFees + marketingReserve + returnsReserve;
+  const estimatedContribution = suggestedPrice - landed - estimatedVariableCosts;
+  const contributionMargin = suggestedPrice ? estimatedContribution / suggestedPrice : 0;
 
-  const category = categoryFor(p);
-  const categoryItems = catalog.filter(x => categoryFor(x) === category);
-  const categoryPrices = categoryItems.map(x => Number(x.price) + shippingCost(x)).filter(x => x > 0);
-  const minCategoryPrice = categoryPrices.length ? Math.min(...categoryPrices) : landed;
-  const maxCategoryPrice = categoryPrices.length ? Math.max(...categoryPrices) : landed;
-  const priceAdvantage = maxCategoryPrice > minCategoryPrice
-    ? Math.max(0, Math.min(1, (maxCategoryPrice - landed) / (maxCategoryPrice - minCategoryPrice)))
-    : 0.5;
-
-  const marginPoints = Math.min(grossMargin / 0.60, 1) * 30;
-  const ratingPoints = rating ? Math.min(rating / 5, 1) * 15 : 6;
-  const reviewPoints = Math.min(Math.log10(reviews + 1) / 5, 1) * 15;
-  const shippingPoints = p.shipping === "Free shipping" ? 10 : shipping <= 5 ? 7 : 3;
+  const marginPoints = Math.max(0, Math.min(grossMargin / 0.60, 1)) * 22;
+  const contributionPoints = Math.max(0, Math.min(contributionMargin / 0.30, 1)) * 20;
+  const ratingPoints = rating ? Math.min(rating / 5, 1) * 13 : 6;
+  const reviewPoints = Math.min(Math.log10(reviews + 1) / 5, 1) * 13;
+  const shippingPoints = p.shipping === 'Free shipping' ? 10 : shipping <= 5 ? 7 : 3;
   const deliveryPoints = days == null ? 5 : days <= 4 ? 10 : days <= 7 ? 7 : days <= 12 ? 4 : 1;
-  const pricePoints = priceAdvantage * 10;
-  const genericPoints = p.brand === "Generic" ? 5 : 2;
 
-  const rawScore = marginPoints + ratingPoints + reviewPoints + shippingPoints + deliveryPoints + pricePoints + genericPoints;
-  const score = Math.round(Math.min(100, (rawScore / 95) * 100));
+  // Catalog evidence is explicitly called "observed competition". It is not
+  // a claim about the whole market and will later be replaced/enriched with
+  // broader market signals.
+  const observedCount = comparableItems.length;
+  let competition = 'Medium observed competition';
+  if (observedCount <= 2) competition = 'Low observed competition';
+  else if (observedCount >= 4) competition = 'High observed competition';
+  const competitionPoints = observedCount <= 2 ? 7 : observedCount >= 4 ? 2 : 5;
 
-  let competition = "Medium";
-  if (categoryItems.length >= 4) competition = "High";
-  else if (categoryItems.length <= 2) competition = "Low";
+  let priceEvidencePoints = 2;
+  if (marketMedian && landed < marketMedian) {
+    const advantage = Math.min(1, (marketMedian - landed) / marketMedian);
+    priceEvidencePoints = advantage * 10;
+  } else if (marketMedian) {
+    const ratio = landed / marketMedian;
+    priceEvidencePoints = ratio <= 1.25 ? 7 : ratio <= 1.75 ? 4 : 0;
+  }
 
-  let verdict = "Needs review";
-  if (score >= 80) verdict = "Strong candidate";
-  else if (score >= 65) verdict = "Worth investigating";
-  else if (score < 45) verdict = "Weak candidate";
+  // Higher-ticket products can still be viable, but they carry more capital,
+  // refund and customer-acquisition risk in a small dropshipping test.
+  const ticketRiskPoints = landed <= 25 ? 5 : landed <= 50 ? 4 : landed <= 100 ? 2 : 0;
+
+  const rawScore = marginPoints + contributionPoints + ratingPoints + reviewPoints +
+    shippingPoints + deliveryPoints + competitionPoints + priceEvidencePoints + ticketRiskPoints;
+  const score = Math.round(Math.min(100, (rawScore / 110) * 100));
+
+  let verdict = 'Needs review';
+  if (score >= 80) verdict = 'Strong candidate';
+  else if (score >= 65) verdict = 'Worth investigating';
+  else if (score < 45) verdict = 'Weak candidate';
+  if (marketMedian == null && landed > 50 && verdict === 'Strong candidate') verdict = 'Worth investigating';
+  if (marketMedian && suggestedPrice <= landed && verdict === 'Strong candidate') verdict = 'Worth investigating';
+  if (marketMedian && suggestedPrice <= landed && score < 65) verdict = 'Weak candidate';
 
   const reasons = [];
-  if (grossMargin >= 0.5) reasons.push("healthy estimated gross margin");
-  if (rating >= 4.4) reasons.push("strong customer rating");
-  if (reviews >= 5000) reasons.push("substantial review volume");
-  if (p.shipping === "Free shipping") reasons.push("free shipping");
-  if (days != null && days <= 7) reasons.push("reasonable delivery window");
-  if (competition === "Low") reasons.push("limited catalog competition");
-  if (!reasons.length) reasons.push("some positive signals, but more validation is needed");
+  if (grossMargin >= 0.5) reasons.push('healthy estimated gross margin');
+  if (contributionMargin >= 0.25) reasons.push('room for payment, marketing and returns reserves');
+  if (rating >= 4.4) reasons.push('strong customer rating');
+  if (reviews >= 5000) reasons.push('substantial review volume');
+  if (p.shipping === 'Free shipping') reasons.push('free shipping');
+  if (days != null && days <= 7) reasons.push('reasonable delivery window');
+  if (marketMedian && landed < marketMedian) reasons.push('landed cost is below observed comparable pricing');
+  if (observedCount <= 2) reasons.push('limited observed catalog competition');
+  if (targetPrice > marketCeiling && Number.isFinite(marketCeiling)) reasons.unshift('target margin price is above observed comparable pricing');
+  if (suggestedPrice <= landed) reasons.unshift('observed market pricing does not support a healthy markup');
+  if (marketMedian == null) reasons.unshift('limited market-price evidence for this product');
+  if (landed > 100) reasons.unshift('higher-ticket item carries more test and return risk');
+  if (contributionMargin < 0.15) reasons.push('thin estimated contribution after variable-cost reserves');
+  if (!reasons.length) reasons.push('some positive signals, but more validation is needed');
 
   return {
     opportunityScore: score,
     opportunityVerdict: verdict,
     category,
     estimatedLandedCost: Number(landed.toFixed(2)),
-    estimatedTestPrice: Number(suggestedPrice.toFixed(2)),
+    estimatedTestPrice: suggestedPrice > landed ? Number(suggestedPrice.toFixed(2)) : null,
     estimatedGrossProfit: Number(grossProfit.toFixed(2)),
     estimatedGrossMargin: Number((grossMargin * 100).toFixed(1)),
+    estimatedContributionProfit: Number(estimatedContribution.toFixed(2)),
+    estimatedContributionMargin: Number((contributionMargin * 100).toFixed(1)),
+    estimatedVariableCosts: Number(estimatedVariableCosts.toFixed(2)),
+    marketMedianComparablePrice: marketMedian == null ? null : Number(marketMedian.toFixed(2)),
+    marketEvidence: marketMedian == null ? 'None' : (currentBrand === 'generic' ? 'Generic comparable products' : 'Same-brand comparable products'),
+    observedComparableCount: observedCount,
     competition,
-    opportunityReasons: reasons.slice(0, 3),
-    opportunityDisclaimer: "Estimates only. Validate supplier cost, shipping, fees, taxes, demand and returns before selling."
+    opportunityReasons: reasons.slice(0, 4),
+    targetMarginPrice: Number(targetPrice.toFixed(2)),
+    marketCeilingPrice: Number.isFinite(marketCeiling) ? Number(marketCeiling.toFixed(2)) : null,
+    opportunityAssumptions: assumptions,
+    opportunityDisclaimer: 'Screening estimates only. Observed competition is limited to this catalog; validate current supplier pricing, shipping, fees, taxes, demand, returns and actual market prices before selling.'
   };
 }
-
 function normalize(p) {
   return {
     id: String(p.id),
@@ -192,14 +277,17 @@ const server = http.createServer((req, res) => {
       demoMode: true,
       version: APP_VERSION,
       scoring: {
-        margin: "30%",
-        rating: "15%",
-        reviews: "15%",
+        grossMargin: "22%",
+        contributionMargin: "20%",
+        rating: "13%",
+        reviews: "13%",
         shipping: "10%",
         delivery: "10%",
-        priceAdvantage: "10%",
-        productType: "5%",
-        note: "Heuristic screening score; AI analysis can be layered on later."
+        observedCompetition: "7%",
+        priceEvidence: "10%",
+        ticketRisk: "5%",
+        costModel: "Payment 2.9% + $0.30; marketing reserve 12%; returns reserve 3%",
+        note: "Heuristic screening score. Market competition is catalog-observed only; AI analysis can be layered on later."
       },
       results
     });
