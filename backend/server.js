@@ -4,7 +4,7 @@ const path = require("path");
 const { URL } = require("url");
 
 const PORT = process.env.PORT || 3000;
-const APP_VERSION = "v5.1.5-opportunity-engine";
+const APP_VERSION = "v5.1.6-market-price-guardrails";
 
 const demoProducts = [
   {id:"demo-amazon-earbuds", name:"Apple AirPods Pro (2nd Generation) USB-C", store:"Amazon", price:189.99, rating:4.6, reviews:18542, shipping:"Free shipping", delivery:"2–3 days", url:"https://www.amazon.com/", keywords:"wireless earbuds airpods headphones apple", brand:"Apple"},
@@ -102,23 +102,27 @@ function opportunityScore(p, catalog = demoProducts) {
   const marketMedian = median(observedPrices);
   const marketMax = observedPrices.length ? Math.max(...observedPrices) : null;
 
-  // Start from a 55% gross-margin target, then constrain the test price using
-  // observed comparable pricing when that evidence exists. This prevents the
-  // engine from inventing an attractive price that is far outside the observed
-  // market for generic products.
+  // Start from a 55% gross-margin target, but do NOT invent a market price.
+  // When comparable evidence exists, the suggested test price must remain at
+  // or below the observed market ceiling. When no comparable evidence exists,
+  // the product gets no fabricated test price; it must be validated first.
   const targetPrice = landed > 0 ? landed / (1 - assumptions.targetGrossMargin) : 0;
-  const marketCeiling = marketMax ? marketMax * 1.10 : Infinity;
-  const floorPrice = landed > 0 ? Math.max(9.99, landed * 1.5) : 9.99;
-  const marketAwarePrice = Math.min(targetPrice, marketCeiling);
-  const suggestedPrice = roundPsychological(Math.max(9.99, marketAwarePrice));
+  const marketCeiling = marketMax ? marketMax * 1.10 : null;
+  let suggestedPrice = null;
+  if (marketCeiling != null) {
+    const candidate = Math.min(targetPrice, marketCeiling);
+    const psychological = roundPsychological(Math.max(9.99, candidate));
+    suggestedPrice = psychological <= marketCeiling ? psychological : Number((Math.floor(marketCeiling * 100) / 100).toFixed(2));
+    if (suggestedPrice <= landed) suggestedPrice = null;
+  }
 
-  const grossProfit = Math.max(0, suggestedPrice - landed);
+  const grossProfit = suggestedPrice == null ? 0 : Math.max(0, suggestedPrice - landed);
   const grossMargin = suggestedPrice ? grossProfit / suggestedPrice : 0;
-  const paymentFees = suggestedPrice * assumptions.paymentFeeRate + assumptions.paymentFeeFixed;
-  const marketingReserve = suggestedPrice * assumptions.marketingReserveRate;
-  const returnsReserve = suggestedPrice * assumptions.returnsReserveRate;
+  const paymentFees = suggestedPrice == null ? 0 : suggestedPrice * assumptions.paymentFeeRate + assumptions.paymentFeeFixed;
+  const marketingReserve = suggestedPrice == null ? 0 : suggestedPrice * assumptions.marketingReserveRate;
+  const returnsReserve = suggestedPrice == null ? 0 : suggestedPrice * assumptions.returnsReserveRate;
   const estimatedVariableCosts = paymentFees + marketingReserve + returnsReserve;
-  const estimatedContribution = suggestedPrice - landed - estimatedVariableCosts;
+  const estimatedContribution = suggestedPrice == null ? 0 : suggestedPrice - landed - estimatedVariableCosts;
   const contributionMargin = suggestedPrice ? estimatedContribution / suggestedPrice : 0;
 
   const marginPoints = Math.max(0, Math.min(grossMargin / 0.60, 1)) * 22;
@@ -152,15 +156,19 @@ function opportunityScore(p, catalog = demoProducts) {
 
   const rawScore = marginPoints + contributionPoints + ratingPoints + reviewPoints +
     shippingPoints + deliveryPoints + competitionPoints + priceEvidencePoints + ticketRiskPoints;
-  const score = Math.round(Math.min(100, (rawScore / 110) * 100));
+  let score = Math.round(Math.min(100, (rawScore / 110) * 100));
+
+  // A product cannot be a strong dropshipping candidate when we have no
+  // comparable market-price evidence. Demand signals can still look good,
+  // but the economics are not validated yet.
+  if (marketMedian == null) score = Math.min(score, 59);
 
   let verdict = 'Needs review';
   if (score >= 80) verdict = 'Strong candidate';
   else if (score >= 65) verdict = 'Worth investigating';
   else if (score < 45) verdict = 'Weak candidate';
-  if (marketMedian == null && landed > 50 && verdict === 'Strong candidate') verdict = 'Worth investigating';
-  if (marketMedian && suggestedPrice <= landed && verdict === 'Strong candidate') verdict = 'Worth investigating';
-  if (marketMedian && suggestedPrice <= landed && score < 65) verdict = 'Weak candidate';
+  if (marketMedian == null) verdict = score < 45 ? 'Weak candidate' : 'Needs market validation';
+  if (marketMedian && suggestedPrice == null) verdict = 'Weak candidate';
 
   const reasons = [];
   if (grossMargin >= 0.5) reasons.push('healthy estimated gross margin');
@@ -183,7 +191,7 @@ function opportunityScore(p, catalog = demoProducts) {
     opportunityVerdict: verdict,
     category,
     estimatedLandedCost: Number(landed.toFixed(2)),
-    estimatedTestPrice: suggestedPrice > landed ? Number(suggestedPrice.toFixed(2)) : null,
+    estimatedTestPrice: suggestedPrice == null ? null : Number(suggestedPrice.toFixed(2)),
     estimatedGrossProfit: Number(grossProfit.toFixed(2)),
     estimatedGrossMargin: Number((grossMargin * 100).toFixed(1)),
     estimatedContributionProfit: Number(estimatedContribution.toFixed(2)),
@@ -195,7 +203,7 @@ function opportunityScore(p, catalog = demoProducts) {
     competition,
     opportunityReasons: reasons.slice(0, 4),
     targetMarginPrice: Number(targetPrice.toFixed(2)),
-    marketCeilingPrice: Number.isFinite(marketCeiling) ? Number(marketCeiling.toFixed(2)) : null,
+    marketCeilingPrice: marketCeiling == null ? null : Number(marketCeiling.toFixed(2)),
     opportunityAssumptions: assumptions,
     opportunityDisclaimer: 'Screening estimates only. Observed competition is limited to this catalog; validate current supplier pricing, shipping, fees, taxes, demand, returns and actual market prices before selling.'
   };
