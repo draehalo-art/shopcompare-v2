@@ -1,0 +1,18 @@
+{
+  "name": "shopcompare",
+  "version": "0.2.2",
+  "private": true,
+  "description": "ShopCompare comparison shopping prototype with a retailer-connector backend.",
+  "main": "backend/server.js",
+  "scripts": {
+    "start": "node backend/server.js",
+    "dev": "node backend/server.js",
+    "test": "node --test backend/*.test.js backend/config/*.test.js backend/providers/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2"
+  }
+}
